@@ -35,13 +35,28 @@ HOST = '127.0.0.1'  # 监听地址，建议监听本地然后由web服务器反�
 PORT = 80  # 监听端口
 ASSET_URL = 'http://lemonawa.me/gh-proxy/'  # 主页
 
-white_list = [tuple([x.replace(' ', '') for x in i.split('/')]) for i in white_list.split('\n') if i]
-black_list = [tuple([x.replace(' ', '') for x in i.split('/')]) for i in black_list.split('\n') if i]
-pass_list = [tuple([x.replace(' ', '') for x in i.split('/')]) for i in pass_list.split('\n') if i]
+white_list = [
+    tuple(x.replace(' ', '') for x in i.split('/'))
+    for i in white_list.split('\n')
+    if i
+]
+
+black_list = [
+    tuple(x.replace(' ', '') for x in i.split('/'))
+    for i in black_list.split('\n')
+    if i
+]
+
+pass_list = [
+    tuple(x.replace(' ', '') for x in i.split('/'))
+    for i in pass_list.split('\n')
+    if i
+]
+
 app = Flask(__name__)
 CHUNK_SIZE = 1024 * 10
 index_html = requests.get(ASSET_URL, timeout=10).text
-icon_r = requests.get(ASSET_URL + '/favicon.ico', timeout=10).content
+icon_r = requests.get(f'{ASSET_URL}/favicon.ico', timeout=10).content
 exp1 = re.compile(r'^(?:https?://)?github\.com/(?P<author>.+?)/(?P<repo>.+?)/(?:releases|archive)/.*$')
 exp2 = re.compile(r'^(?:https?://)?github\.com/(?P<author>.+?)/(?P<repo>.+?)/(?:blob|raw)/.*$')
 exp3 = re.compile(r'^(?:https?://)?github\.com/(?P<author>.+?)/(?P<repo>.+?)/(?:info|git-).*$')
@@ -70,8 +85,7 @@ def iter_content(self, chunk_size=1, decode_unicode=False):
         # Special case for urllib3.
         if hasattr(self.raw, 'stream'):
             try:
-                for chunk in self.raw.stream(chunk_size, decode_content=False):
-                    yield chunk
+                yield from self.raw.stream(chunk_size, decode_content=False)
             except ProtocolError as e:
                 raise ChunkedEncodingError(e)
             except DecodeError as e:
@@ -91,7 +105,10 @@ def iter_content(self, chunk_size=1, decode_unicode=False):
     if self._content_consumed and isinstance(self._content, bool):
         raise StreamConsumedError()
     elif chunk_size is not None and not isinstance(chunk_size, int):
-        raise TypeError("chunk_size must be an int, it is instead a %s." % type(chunk_size))
+        raise TypeError(
+            f"chunk_size must be an int, it is instead a {type(chunk_size)}."
+        )
+
     # simulate reading small chunks of the content
     reused_chunks = iter_slices(self._content, chunk_size)
 
@@ -107,36 +124,33 @@ def iter_content(self, chunk_size=1, decode_unicode=False):
 
 def check_url(u):
     for exp in (exp1, exp2, exp3, exp4, exp5):
-        m = exp.match(u)
-        if m:
+        if m := exp.match(u):
             return m
     return False
 
 
 @app.route('/<path:u>', methods=['GET', 'POST'])
 def handler(u):
-    u = u if u.startswith('http') else 'https://' + u
+    u = u if u.startswith('http') else f'https://{u}'
     if u.rfind('://', 3, 9) == -1:
         u = u.replace('s:/', 's://', 1)  # uwsgi会将//传递为/
-    pass_by = False
-    m = check_url(u)
-    if m:
-        m = tuple(m.groups())
-        if white_list:
-            for i in white_list:
-                if m[:len(i)] == i or i[0] == '*' and len(m) == 2 and m[1] == i[1]:
-                    break
-            else:
-                return Response('Forbidden by white list.', status=403)
-        for i in black_list:
-            if m[:len(i)] == i or i[0] == '*' and len(m) == 2 and m[1] == i[1]:
-                return Response('Forbidden by black list.', status=403)
-        for i in pass_list:
-            if m[:len(i)] == i or i[0] == '*' and len(m) == 2 and m[1] == i[1]:
-                pass_by = True
-                break
-    else:
+    if not (m := check_url(u)):
         return Response('Invalid input.', status=403)
+
+    m = tuple(m.groups())
+    if white_list:
+        for i in white_list:
+            if m[:len(i)] == i or i[0] == '*' and len(m) == 2 and m[1] == i[1]:
+                break
+        else:
+            return Response('Forbidden by white list.', status=403)
+    for i in black_list:
+        if m[:len(i)] == i or i[0] == '*' and len(m) == 2 and m[1] == i[1]:
+            return Response('Forbidden by black list.', status=403)
+    pass_by = any(
+        m[: len(i)] == i or i[0] == '*' and len(m) == 2 and m[1] == i[1]
+        for i in pass_list
+    )
 
     if (jsdelivr or pass_by) and exp2.match(u):
         u = u.replace('/blob/', '@', 1).replace('github.com', 'cdn.jsdelivr.net/gh', 1)
@@ -152,7 +166,7 @@ def handler(u):
         if pass_by:
             url = u + request.url.replace(request.base_url, '', 1)
             if url.startswith('https:/') and not url.startswith('https://'):
-                url = 'https://' + url[7:]
+                url = f'https://{url[7:]}'
             return redirect(url)
         return proxy(u)
 
@@ -165,7 +179,7 @@ def proxy(u, allow_redirects=False):
     try:
         url = u + request.url.replace(request.base_url, '', 1)
         if url.startswith('https:/') and not url.startswith('https://'):
-            url = 'https://' + url[7:]
+            url = f'https://{url[7:]}'
         r = requests.request(method=request.method, url=url, data=request.data, headers=r_headers, stream=True, allow_redirects=allow_redirects)
         headers = dict(r.headers)
 
@@ -173,20 +187,19 @@ def proxy(u, allow_redirects=False):
             return redirect(u + request.url.replace(request.base_url, '', 1))
 
         def generate():
-            for chunk in iter_content(r, chunk_size=CHUNK_SIZE):
-                yield chunk
+            yield from iter_content(r, chunk_size=CHUNK_SIZE)
 
         if 'Location' in r.headers:
             _location = r.headers.get('Location')
             if check_url(_location):
-                headers['Location'] = '/' + _location
+                headers['Location'] = f'/{_location}'
             else:
                 return proxy(_location, True)
 
         return Response(generate(), headers=headers, status=r.status_code)
     except Exception as e:
         headers['content-type'] = 'text/html; charset=UTF-8'
-        return Response('server error ' + str(e), status=500, headers=headers)
+        return Response(f'server error {str(e)}', status=500, headers=headers)
 
 app.debug = True
 if __name__ == '__main__':
